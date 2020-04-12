@@ -231,13 +231,22 @@ def _make_pathname(filename):
     return os.path.join(DIR_FULLTEXT, cat, yearmonth, basename)
 
 def process_tarfile_inner(filename, pdfnames=None, processes=1, dryrun=False,
-                          timelimit=fulltext.TIMELIMIT):
+                          timelimit=fulltext.TIMELIMIT, fileinfo=None):
     outname = _tar_to_filename(filename)
 
+    clean_out = False
     if not os.path.exists(outname):
-        msg = 'Tarfile from manifest not found {}, skipping...'.format(outname)
-        logger.error(msg)
-        return
+        if fileinfo is not None:
+            logger.info('downloading %s', fileinfo['filename'])
+            download_check_tarfile(fileinfo['filename'], fileinfo['md5sum'], dryrun=dryrun)
+            clean_out = True
+            if not os.path.exists(outname):
+                logger.error('failed download %s', fileinfo['filename'])
+                return
+        else:
+            msg = 'Tarfile from manifest not found {}, skipping...'.format(outname)
+            logger.error(msg)
+            return
 
     # unpack tar file
     if pdfnames:
@@ -268,7 +277,10 @@ def process_tarfile_inner(filename, pdfnames=None, processes=1, dryrun=False,
             shutil.move(tf, mvfn)
 
     # clean up pdfs
+    logger.info('completed %s, cleaning', outname)
     _call('rm -rf {}'.format(os.path.join(DIR_PDFTARS, basename)), dryrun)
+    if clean_out:
+        _call('rm -rf {}'.format(outname))
 
 def process_tarfile(fileinfo, pdfnames=None, dryrun=False, debug=False, processes=1):
     """
@@ -299,9 +311,9 @@ def process_tarfile(fileinfo, pdfnames=None, dryrun=False, debug=False, processe
         return
 
     logger.info('Processing tar "{}" ...'.format(filename))
-    process_tarfile_inner(filename, pdfnames=None, processes=processes, dryrun=dryrun)
+    process_tarfile_inner(filename, pdfnames=None, processes=processes, dryrun=dryrun, fileinfo=fileinfo)
 
-def process_manifest_files(list_of_fileinfo, processes=1, dryrun=False):
+def process_manifest_files(list_of_fileinfo, processes=1, dryrun=False, concurrent_downloads=16):
     """
     Download PDFs from the ArXiv AWS S3 bucket and convert each pdf to text
     Parameters. If files are already downloaded, it will only process them.
@@ -314,8 +326,15 @@ def process_manifest_files(list_of_fileinfo, processes=1, dryrun=False):
         dryrun : bool
             If True, only log activity
     """
-    for fileinfo in list_of_fileinfo:
-        process_tarfile(fileinfo, dryrun=dryrun, processes=processes)
+    if concurrent_downloads > 1:
+        processes = max(processes // concurrent_downloads, 1)
+        with Pool(concurrent_downloads) as p:
+            from functools import partial
+            pt = partial(process_tarfile, dryrun=dryrun, processes=processes)
+            p.map(pt, list_of_fileinfo)
+    else:
+        for fileinfo in list_of_fileinfo:
+            process_tarfile(fileinfo, dryrun=dryrun, processes=processes)
 
 def check_if_any_processed(fileinfo):
     """
